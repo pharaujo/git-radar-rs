@@ -26,6 +26,10 @@ usage:
 Bash example:
   export PS1=\"\\W\\$(radar --bash) \"
 
+Keep $(radar --bash) itself in PS1, as above. Never put radar's output into PS1
+(e.g. PS1=\"...$(radar --bash)...\" in PROMPT_COMMAND): bash would expand a branch
+named $(cmd) and run cmd.
+
 The main branch for the 𝘮 comparison is, in order: git config radar.mainBranch,
 then <remote>/HEAD, <remote>/main, <remote>/master for the branch's remote and origin.
 ";

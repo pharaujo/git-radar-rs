@@ -44,6 +44,14 @@ The output is raw bytes. Escape sequences are already wrapped in readline's `\00
 markers, so no `echo -e` is needed. It starts with a space, like git-radar's. Outside a
 repository radar prints nothing. It always exits 0 and never writes to stderr.
 
+**Keep `$(…)` inside `PS1`, never radar's output.** Branch names may contain `$(…)` and
+backticks (`git check-ref-format` allows them), and radar prints them verbatim, like git-radar.
+With the setup above that's harmless: bash runs radar at each prompt and doesn't expand its
+output again. It is **not** harmless if radar's output is pasted into `PS1` itself, as in
+`PROMPT_COMMAND='PS1="\w$(radar --bash) \$ "'`. bash then expands the branch name, so cloning a
+repository whose default branch is `$(cmd)` and `cd`-ing into it runs `cmd`. git-radar has
+the same problem with that setup; git fixed the same bug in its own `git-prompt.sh` in 2014.
+
 **Coming from git-radar?** The usual `echo -e $(git-radar --bash)` is unquoted, so it drops
 the leading space. If your `PS1` already has a space before the segment, print
 `"${out# }"` instead of `"$out"` to keep the prompt looking the same.
