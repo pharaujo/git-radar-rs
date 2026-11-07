@@ -59,8 +59,18 @@ jobs:
           rustup toolchain install
           rustc --version
 
+      # The tap's formula pins the git-radar 0.6 tarball by sha256, but the formula itself is
+      # Ruby that brew runs. Pin the tap to the reviewed commit so a takeover of the (inactive)
+      # tap repository can't run code here or poison the cache.
       - name: Install git and the git-radar oracle
+        env:
+          TAP_COMMIT: 988e33c1e1f9712e7f0d43a6767f7d4d47c29c9a
         run: |
+          brew tap michaeldfallen/formula
+          tap="$(brew --repo michaeldfallen/formula)"
+          git -C "$tap" fetch -q origin "$TAP_COMMIT"
+          git -C "$tap" checkout -q --detach "$TAP_COMMIT"
+          test "$(git -C "$tap" rev-parse HEAD)" = "$TAP_COMMIT"
           brew install git michaeldfallen/formula/git-radar
           test -x /opt/homebrew/bin/git
           test -x /opt/homebrew/bin/git-radar
