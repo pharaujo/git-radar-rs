@@ -2,9 +2,11 @@
 //!
 //! Output discipline: nothing ever goes to stderr, the exit code is always 0, and stdout is
 //! written once, after the whole prompt has been built. A panic anywhere prints nothing, so a
-//! half-written prompt with an unclosed `\x01` can't break readline.
+//! half-written prompt with an unclosed `\x01` can't break readline. Past 5 s or 1 GiB of heap,
+//! radar gives up the same way (see `guard`).
 
 mod graph;
+mod guard;
 mod installcfg;
 mod mainbranch;
 mod render;
@@ -42,10 +44,16 @@ fn run(args: &[String]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+#[global_allocator]
+static ALLOC: guard::Capped = guard::Capped;
+
 fn main() {
     std::panic::set_hook(Box::new(|_| {}));
+    guard::start();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Ok(Some(out)) = std::panic::catch_unwind(|| run(&args)) {
+    if let Ok(Some(out)) = std::panic::catch_unwind(|| run(&args))
+        && guard::begin_output()
+    {
         let _ = std::io::stdout().write_all(&out);
     }
 }

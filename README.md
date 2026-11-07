@@ -32,6 +32,12 @@ The output is raw bytes. Escape sequences are already wrapped in readline's `\00
 markers, so no `echo -e` is needed. It starts with a space, like git-radar's. Outside a
 repository radar prints nothing. It always exits 0 and never writes to stderr.
 
+radar also prints nothing if it runs longer than **5 seconds** or allocates more than **1 GiB** of
+heap. radar runs in every directory you `cd` into, and some files in `.git` are read to the end.
+A planted symlink to `/dev/zero` (as `HEAD`, `packed-refs`, a reflog or an excludes file) would
+otherwise use up all memory, and a FIFO would hang the prompt. A repository that's legitimately
+slower than 5 s gets an empty prompt instead of a slow one.
+
 ## Which branch is "main"
 
 The `𝘮` segment compares your upstream with the first of:
@@ -87,7 +93,7 @@ hooks, textconv) aren't used by anything radar does, but no test asserts that.
 
 ```bash
 cargo test                       # unit + golden tests (golden needs git-radar installed)
-cargo test -- --ignored          # also the slow >40k-object abbreviation test
+cargo test -- --ignored          # also the >40k-object abbreviation and 1 GiB memory-cap tests
 GIT_RADAR_BIN=/path/to/git-radar cargo test
 scripts/bench.sh <repo-dir>      # hyperfine: git-radar vs radar vs `git status`
 ```

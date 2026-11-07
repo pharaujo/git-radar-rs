@@ -59,6 +59,7 @@ impl Env {
         self.vars.insert(k.to_owned(), v.as_ref().to_owned());
         self
     }
+    #[cfg_attr(not(debug_assertions), allow(dead_code))] // only debug-only tests use it
     fn unset(mut self, k: &str) -> Self {
         self.vars.remove(k);
         self
@@ -628,29 +629,69 @@ fn intent_to_add_then_replace(fx: &Fx, name: &str, make: impl FnOnce(&Path)) {
     make(&path);
 }
 
-fn mkfifo(fx: &Fx, path: &Path) {
-    let out = fx.run_in(&fx.env, &fx.root, "mkfifo", &[path.to_str().unwrap()]);
-    assert!(out.status.success(), "mkfifo {}", path.display());
+fn mkfifo(path: &Path) {
+    let status = Command::new("/usr/bin/mkfifo").arg(path).status().unwrap();
+    assert!(status.success(), "mkfifo {}", path.display());
 }
 
-/// Run radar in `cwd` and kill it if it takes longer than `limit`, so a hang fails the test
-/// instead of blocking the whole suite.
+struct Guarded {
+    out: Output,
+    elapsed: std::time::Duration,
+}
+
+/// Run radar in `cwd` under an external watchdog: kill it past `limit` or past `rss_mb` of
+/// resident memory. A hang or runaway allocation then fails the test, instead of blocking the
+/// suite or exhausting the machine.
 #[track_caller]
-fn assert_radar_finishes(fx: &Fx, cwd: &str, limit: std::time::Duration) {
+fn radar_guarded(
+    fx: &Fx,
+    env: &Env,
+    cwd: &str,
+    limit: std::time::Duration,
+    rss_mb: u64,
+) -> Guarded {
+    use std::process::Stdio;
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_radar"));
-    fx.env.apply(&mut cmd).current_dir(fx.p(cwd)).arg("--bash");
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    env.apply(&mut cmd)
+        .current_dir(fx.p(cwd))
+        .arg("--bash")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().unwrap();
+    let pid = child.id().to_string();
     let start = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
-        if start.elapsed() > limit {
+        let rss_mb_now = Command::new("/bin/ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .map_or(0, |kb| kb / 1024);
+        if rss_mb_now > rss_mb || start.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("radar still running after {limit:?} in {cwd}");
+            panic!(
+                "radar in {cwd} killed after {:?} at {rss_mb_now} MB resident",
+                start.elapsed()
+            );
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let elapsed = start.elapsed();
+    Guarded {
+        out: child.wait_with_output().unwrap(),
+        elapsed,
+    }
+}
+
+#[track_caller]
+fn assert_radar_finishes(fx: &Fx, cwd: &str, limit: std::time::Duration) {
+    radar_guarded(fx, &fx.env, cwd, limit, 1024);
 }
 
 const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -665,7 +706,7 @@ fn intent_to_add_symlink_is_not_followed() {
     fx.with_remote("master");
     fx.commit("w", "gone.txt", &lines(20, "ita"), "gone");
     std::fs::remove_file(fx.p("w/gone.txt")).unwrap();
-    mkfifo(&fx, &fx.p("fifo"));
+    mkfifo(&fx.p("fifo"));
     intent_to_add_then_replace(&fx, "new", |p| {
         std::os::unix::fs::symlink("../fifo", p).unwrap()
     });
@@ -710,7 +751,7 @@ fn intent_to_add_fifo_is_not_read() {
     fx.with_remote("master");
     fx.commit("w", "gone.txt", &lines(20, "ita"), "gone");
     std::fs::remove_file(fx.p("w/gone.txt")).unwrap();
-    intent_to_add_then_replace(&fx, "new", |p| mkfifo(&fx, p));
+    intent_to_add_then_replace(&fx, "new", mkfifo);
     assert_radar_finishes(&fx, "w", HANG_LIMIT);
     fx.same("w");
 }
@@ -1272,6 +1313,142 @@ fn panic_prints_nothing_and_exits_zero() {
         out.stderr.is_empty(),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// process guard: hostile files in `.git` must not hang the prompt or exhaust memory
+
+/// Places in `.git` that gix reads to EOF. Pointed at `/dev/zero` they allocate without bound
+/// (`index` is the exception: it's only a FIFO hazard); pointed at a FIFO they block forever.
+#[cfg(debug_assertions)]
+const HOSTILE_PATHS: &[&str] = &[
+    "HEAD",
+    "packed-refs",
+    "stash reflog",
+    "info/exclude",
+    "core.excludesFile",
+    "core.attributesFile",
+    "branch ref",
+];
+
+/// A fresh `w` repo whose `what` points at `target`.
+fn hostile_repo(what: &str, target: &Path) -> Fx {
+    let fx = Fx::new();
+    fx.with_remote("master");
+    let git_path = |rel: &str| fx.p(&format!("w/.git/{rel}"));
+    let replace = |rel: &str| {
+        let path = git_path(rel);
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::fs::symlink(target, &path).unwrap();
+    };
+    let target_str = target.to_str().unwrap();
+    match what {
+        "HEAD" => replace("HEAD"),
+        "packed-refs" => {
+            fx.git("w", &["pack-refs", "--all"]);
+            replace("packed-refs");
+        }
+        "stash reflog" => {
+            fx.write("w/README", "changed\n");
+            fx.git("w", &["stash", "-q"]);
+            replace("logs/refs/stash");
+        }
+        "info/exclude" => replace("info/exclude"),
+        "core.excludesFile" => {
+            fx.git("w", &["config", "core.excludesFile", target_str]);
+        }
+        "core.attributesFile" => {
+            fx.git("w", &["config", "core.attributesFile", target_str]);
+        }
+        "branch ref" => replace("refs/heads/master"),
+        "index" => replace("index"),
+        other => panic!("unknown hostile path {other}"),
+    }
+    fx
+}
+
+#[track_caller]
+fn assert_silent_success(g: &Guarded, what: &str) {
+    assert!(g.out.status.success(), "{what}: exit {:?}", g.out.status);
+    assert!(
+        g.out.stdout.is_empty(),
+        "{what}: stdout {}",
+        show(&g.out.stdout)
+    );
+    assert!(
+        g.out.stderr.is_empty(),
+        "{what}: stderr {}",
+        String::from_utf8_lossy(&g.out.stderr)
+    );
+}
+
+/// With a 64 MiB cap, each `/dev/zero` read stops at the cap: silent exit 0, long before the
+/// 5 s watchdog. The external ceiling (512 MB) only matters if the cap is broken.
+#[test]
+#[cfg(debug_assertions)]
+fn memory_cap_stops_reads_from_dev_zero() {
+    for what in HOSTILE_PATHS {
+        let fx = hostile_repo(what, Path::new("/dev/zero"));
+        let env = fx
+            .env
+            .clone()
+            .set("RADAR_TEST_MEMORY_LIMIT", (64u64 << 20).to_string());
+        let g = radar_guarded(&fx, &env, "w", std::time::Duration::from_secs(20), 512);
+        assert_silent_success(&g, what);
+        assert!(
+            g.elapsed < std::time::Duration::from_secs(4),
+            "{what}: took {:?}, so the watchdog fired, not the memory cap",
+            g.elapsed
+        );
+    }
+}
+
+/// With a 300 ms watchdog, each FIFO read is abandoned: silent exit 0.
+#[test]
+#[cfg(debug_assertions)]
+fn watchdog_stops_fifo_reads() {
+    for what in HOSTILE_PATHS.iter().chain(&["index"]) {
+        let tmp = tempfile::tempdir().unwrap();
+        let fifo = tmp.path().join("fifo");
+        mkfifo(&fifo);
+        let fx = hostile_repo(what, &fifo);
+        let env = fx.env.clone().set("RADAR_TEST_TIME_LIMIT_MS", "300");
+        let g = radar_guarded(&fx, &env, "w", std::time::Duration::from_secs(10), 512);
+        assert_silent_success(&g, what);
+        assert!(
+            g.elapsed < std::time::Duration::from_secs(4),
+            "{what}: took {:?}",
+            g.elapsed
+        );
+    }
+}
+
+/// The real 5 s limit, in both debug and release builds.
+#[test]
+fn default_time_limit_is_five_seconds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fifo = tmp.path().join("fifo");
+    mkfifo(&fifo);
+    let fx = hostile_repo("HEAD", &fifo);
+    let g = radar_guarded(&fx, &fx.env, "w", std::time::Duration::from_secs(15), 512);
+    assert_silent_success(&g, "HEAD -> fifo");
+    let secs = g.elapsed.as_secs_f64();
+    assert!((4.9..9.0).contains(&secs), "gave up after {secs:.2}s");
+}
+
+/// The real 1 GiB cap. Ignored by default: it allocates 1 GiB, and the suite runs tests in
+/// parallel.
+#[test]
+#[ignore = "allocates 1 GiB"]
+fn default_memory_cap_is_one_gib() {
+    let fx = hostile_repo("HEAD", Path::new("/dev/zero"));
+    let g = radar_guarded(&fx, &fx.env, "w", std::time::Duration::from_secs(20), 1400);
+    assert_silent_success(&g, "HEAD -> /dev/zero");
+    assert!(
+        g.elapsed < std::time::Duration::from_secs(4),
+        "took {:?}",
+        g.elapsed
     );
 }
 
