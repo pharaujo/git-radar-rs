@@ -98,6 +98,10 @@ GIT_RADAR_BIN=/path/to/git-radar cargo test
 scripts/bench.sh <repo-dir>      # hyperfine: git-radar vs radar vs `git status`
 ```
 
+Without git-radar the golden tests skip themselves. Set `RADAR_REQUIRE_ORACLE=1` to make them
+fail instead. CI (`.github/workflows/ci.yml`, macOS) sets it and runs fmt, clippy, and the debug,
+release and ignored tests.
+
 The golden tests build each fixture repo with the `git` CLI in a temp dir with a fully cleared
 environment, then compare `radar --bash` to `git-radar --bash` byte for byte. They cover
 conflicts of every kind, rebases, renames and copies, `diff.*` fallbacks, intent-to-add,

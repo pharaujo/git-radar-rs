@@ -21,9 +21,15 @@ fn oracle_bin() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Skip the test when git-radar isn't installed, or fail it when `RADAR_REQUIRE_ORACLE` is set
+/// (CI sets it, so a broken oracle install can't turn the suite into silent skips).
 macro_rules! require_oracle {
     () => {
         if oracle_bin().is_none() {
+            assert!(
+                std::env::var_os("RADAR_REQUIRE_ORACLE").is_none(),
+                "git-radar not found and RADAR_REQUIRE_ORACLE is set"
+            );
             eprintln!("skipping: git-radar not found (set GIT_RADAR_BIN)");
             return;
         }

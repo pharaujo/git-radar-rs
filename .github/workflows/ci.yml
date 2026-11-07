@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail, instead of skipping, every golden test if git-radar is missing.
+  RADAR_REQUIRE_ORACLE: "1"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+jobs:
+  test:
+    # The golden tests assume a Homebrew layout (/opt/homebrew/bin/{git,git-radar}) and
+    # Apple's /usr/bin/git, so they run on macOS. Standard runners are free for public repos.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+
+      - name: Install git and the git-radar oracle
+        run: |
+          brew install git michaeldfallen/formula/git-radar
+          test -x /opt/homebrew/bin/git
+          test -x /opt/homebrew/bin/git-radar
+          /opt/homebrew/bin/git --version
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --release -- -D warnings
+      - run: cargo test
+      - run: cargo test --release
+      - name: Ignored tests (1 GiB memory cap, >40k objects)
+        run: cargo test --release -- --ignored
