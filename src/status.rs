@@ -322,6 +322,25 @@ impl gix::diff::rewrites::tracker::Change for Candidate {
     }
 }
 
+/// The blob git would store for the worktree file at `path`, without following symlinks.
+///
+/// A symlink's blob is its target path, like `git add`, so a link to `/dev/zero` costs nothing.
+/// FIFOs, sockets, devices and directories are skipped: reading one could block forever or
+/// never reach EOF.
+fn worktree_blob(path: &std::path::Path) -> Option<(Vec<u8>, gix::object::tree::EntryKind)> {
+    use gix::object::tree::EntryKind;
+    use std::os::unix::ffi::OsStringExt;
+    let md = std::fs::symlink_metadata(path).ok()?;
+    if md.file_type().is_symlink() {
+        let target = std::fs::read_link(path).ok()?;
+        Some((target.into_os_string().into_vec(), EntryKind::Link))
+    } else if md.file_type().is_file() {
+        Some((std::fs::read(path).ok()?, EntryKind::Blob))
+    } else {
+        None
+    }
+}
+
 /// git pairs an intent-to-add entry (` A`) with a file deleted from the worktree (` D`) and
 /// prints a single ` R` line, which git-radar doesn't count. Do the same, with gix's rewrite
 /// tracker limited to those two sets. ITA entries store the empty blob, so destinations are
@@ -365,7 +384,7 @@ fn pair_intent_to_add_with_deleted(
         let Ok(rel) = gix::path::from_byte_slice(path) else {
             continue;
         };
-        let Ok(data) = std::fs::read(workdir.join(rel)) else {
+        let Some((data, kind)) = worktree_blob(&workdir.join(rel)) else {
             continue;
         };
         let Ok(id) = gix::objs::compute_hash(repo.object_hash(), gix::object::Kind::Blob, &data)
@@ -376,7 +395,7 @@ fn pair_intent_to_add_with_deleted(
             Candidate {
                 id,
                 kind: ChangeKind::Addition,
-                mode: gix::object::tree::EntryKind::Blob.into(),
+                mode: kind.into(),
             },
             path.as_ref(),
         );

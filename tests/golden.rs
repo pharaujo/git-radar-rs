@@ -619,6 +619,102 @@ fn intent_to_add_plus_deleted_similar_content() {
     fx.same("w");
 }
 
+/// Mark `w/<name>` intent-to-add, then replace the worktree file with whatever `make` creates.
+fn intent_to_add_then_replace(fx: &Fx, name: &str, make: impl FnOnce(&Path)) {
+    fx.write(&format!("w/{name}"), "placeholder\n");
+    fx.git("w", &["add", "-N", name]);
+    let path = fx.p(&format!("w/{name}"));
+    std::fs::remove_file(&path).unwrap();
+    make(&path);
+}
+
+fn mkfifo(fx: &Fx, path: &Path) {
+    let out = fx.run_in(&fx.env, &fx.root, "mkfifo", &[path.to_str().unwrap()]);
+    assert!(out.status.success(), "mkfifo {}", path.display());
+}
+
+/// Run radar in `cwd` and kill it if it takes longer than `limit`, so a hang fails the test
+/// instead of blocking the whole suite.
+#[track_caller]
+fn assert_radar_finishes(fx: &Fx, cwd: &str, limit: std::time::Duration) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_radar"));
+    fx.env.apply(&mut cmd).current_dir(fx.p(cwd)).arg("--bash");
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("radar still running after {limit:?} in {cwd}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// An intent-to-add symlink is hashed by its link text, like git, never by what it points to.
+/// The target here is a FIFO, so following the link would block forever. A FIFO is used rather
+/// than `/dev/zero`: a regression would then hang, and be killed, instead of eating all memory.
+#[test]
+fn intent_to_add_symlink_is_not_followed() {
+    require_oracle!();
+    let fx = Fx::new();
+    fx.with_remote("master");
+    fx.commit("w", "gone.txt", &lines(20, "ita"), "gone");
+    std::fs::remove_file(fx.p("w/gone.txt")).unwrap();
+    mkfifo(&fx, &fx.p("fifo"));
+    intent_to_add_then_replace(&fx, "new", |p| {
+        std::os::unix::fs::symlink("../fifo", p).unwrap()
+    });
+    assert_radar_finishes(&fx, "w", HANG_LIMIT);
+    fx.same("w");
+}
+
+/// git pairs a deleted symlink with an intent-to-add symlink to the same target, but never a
+/// symlink with a regular file whose content equals the link text.
+#[test]
+fn intent_to_add_symlink_pairs_only_with_symlinks() {
+    require_oracle!();
+    let fx = Fx::new();
+    fx.with_remote("master");
+    std::os::unix::fs::symlink("README", fx.p("w/old-link")).unwrap();
+    fx.commit("w", "same-text", "README", "link and file");
+    fx.git("w", &["add", "old-link"]);
+    fx.git("w", &["commit", "-q", "-m", "link"]);
+
+    // symlink -> symlink, same target: paired, so nothing is shown.
+    std::fs::remove_file(fx.p("w/old-link")).unwrap();
+    intent_to_add_then_replace(&fx, "new-link", |p| {
+        std::os::unix::fs::symlink("README", p).unwrap()
+    });
+    fx.same("w");
+
+    // regular file "README" -> symlink to README: not paired.
+    fx.git("w", &["reset", "-q", "--hard"]);
+    std::fs::remove_file(fx.p("w/same-text")).unwrap();
+    intent_to_add_then_replace(&fx, "link-to-readme", |p| {
+        std::os::unix::fs::symlink("README", p).unwrap()
+    });
+    fx.same("w");
+}
+
+/// An intent-to-add path that is now a FIFO is skipped instead of read. git never pairs it
+/// with a deleted file of this size either.
+#[test]
+fn intent_to_add_fifo_is_not_read() {
+    require_oracle!();
+    let fx = Fx::new();
+    fx.with_remote("master");
+    fx.commit("w", "gone.txt", &lines(20, "ita"), "gone");
+    std::fs::remove_file(fx.p("w/gone.txt")).unwrap();
+    intent_to_add_then_replace(&fx, "new", |p| mkfifo(&fx, p));
+    assert_radar_finishes(&fx, "w", HANG_LIMIT);
+    fx.same("w");
+}
+
 #[test]
 fn typechanges() {
     require_oracle!();
