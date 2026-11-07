@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly, so a new RustSec advisory against a locked dependency fails without a push.
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -20,7 +23,27 @@ env:
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
 jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cargo-deny runs `cargo metadata`, which needs the pinned toolchain.
+      - name: Install Rust (version from rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: RustSec advisories for Cargo.lock
+        run: cargo deny --locked check advisories
+
   test:
+    if: github.event_name != 'schedule'
     # The golden tests assume a Homebrew layout (/opt/homebrew/bin/{git,git-radar}) and
     # Apple's /usr/bin/git, so they run on macOS. Standard runners are free for public repos.
     runs-on: macos-latest
@@ -58,5 +81,5 @@ jobs:
       - run: cargo clippy --all-targets --release -- -D warnings
       - run: cargo test
       - run: cargo test --release
-      - name: Ignored tests (1 GiB memory cap, >40k objects)
+      - name: Ignored tests (1 GiB memory cap, huge files, >40k objects)
         run: cargo test --release -- --ignored

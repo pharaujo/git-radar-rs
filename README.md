@@ -125,11 +125,13 @@ cargo test                       # unit + golden tests (golden needs git-radar i
 cargo test -- --ignored          # also the >40k-object, 1 GiB memory-cap and huge-file tests
 GIT_RADAR_BIN=/path/to/git-radar cargo test
 scripts/bench.sh <repo-dir>      # hyperfine: git-radar vs radar vs `git status`
+cargo deny --locked check advisories   # RustSec advisories for Cargo.lock (needs cargo-deny)
 ```
 
 Without git-radar the golden tests skip themselves. Set `RADAR_REQUIRE_ORACLE=1` to make them
 fail instead. CI (`.github/workflows/ci.yml`, macOS) sets it and runs fmt, clippy, and the debug,
-release and ignored tests.
+release and ignored tests. A separate job checks `Cargo.lock` against the RustSec advisory
+database on every push and weekly, so a new advisory fails CI without a code change.
 
 The golden tests build each fixture repo with the `git` CLI in a temp dir with a fully cleared
 environment, then compare `radar --bash` to `git-radar --bash` byte for byte. They cover
