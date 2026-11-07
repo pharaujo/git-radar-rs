@@ -899,6 +899,90 @@ fn intent_to_add_fifo_is_not_read() {
     fx.same("w");
 }
 
+/// Age a path's mtime without following it if it's a symlink, so status has to look at it again.
+fn touch_link(path: &Path, stamp: &str) {
+    let status = Command::new("/usr/bin/touch")
+        .args(["-h", "-m", "-t", stamp])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "touch -h {}", path.display());
+}
+
+/// Worktree symlinks are what `git clone` can deliver, unlike anything inside `.git`. Status
+/// must read only their target text: never open a link to `/dev/zero` or a FIFO, never descend
+/// into a link to `/`, and not loop on a self-link, with or without `core.symlinks=false`.
+#[test]
+fn worktree_symlinks_are_never_followed() {
+    use std::os::unix::fs::symlink;
+    require_oracle!();
+    let fx = Fx::new();
+    let fifo = fx.p("fifo");
+    mkfifo(&fifo);
+    let fifo = fifo.to_str().unwrap();
+    let base = |repo: &str| {
+        fx.git(".", &["init", "-q", "-b", "master", repo]);
+        fx.commit(repo, "a", "a\n", "init");
+    };
+    let check = |repo: &str| {
+        assert_radar_finishes(&fx, repo, HANG_LIMIT);
+        fx.same(repo);
+    };
+
+    // Tracked links, with stale timestamps so their content is checked again.
+    base("tracked");
+    for (name, target) in [
+        ("zero", "/dev/zero"),
+        ("pipe", fifo),
+        ("root", "/"),
+        ("dev", "/dev"),
+    ] {
+        symlink(target, fx.p(&format!("tracked/{name}"))).unwrap();
+    }
+    fx.git("tracked", &["add", "."]);
+    fx.git("tracked", &["commit", "-q", "-m", "links"]);
+    for name in ["zero", "pipe", "root", "dev"] {
+        touch_link(&fx.p(&format!("tracked/{name}")), "202001010000");
+    }
+    check("tracked");
+    fx.git("tracked", &["config", "core.symlinks", "false"]);
+    touch_link(&fx.p("tracked/zero"), "202001020000");
+    touch_link(&fx.p("tracked/pipe"), "202001020000");
+    check("tracked");
+
+    // Tracked files and a tracked directory replaced by links (typechanges).
+    base("replaced");
+    fx.write("replaced/f1", "x\n");
+    fx.write("replaced/f2", "y\n");
+    fx.write("replaced/d/f", "z\n");
+    fx.git("replaced", &["add", "."]);
+    fx.git("replaced", &["commit", "-q", "-m", "files"]);
+    std::fs::remove_file(fx.p("replaced/f1")).unwrap();
+    std::fs::remove_file(fx.p("replaced/f2")).unwrap();
+    std::fs::remove_dir_all(fx.p("replaced/d")).unwrap();
+    symlink("/dev/zero", fx.p("replaced/f1")).unwrap();
+    symlink(fifo, fx.p("replaced/f2")).unwrap();
+    symlink("/", fx.p("replaced/d")).unwrap();
+    check("replaced");
+    fx.git("replaced", &["config", "core.symlinks", "false"]);
+    check("replaced");
+
+    // Untracked links into big trees, a self-loop and `..`.
+    base("untracked");
+    std::fs::create_dir(fx.p("untracked/u")).unwrap();
+    for (name, target) in [
+        ("root", "/"),
+        ("dev", "/dev"),
+        ("loop", "loop"),
+        ("up", ".."),
+    ] {
+        symlink(target, fx.p(&format!("untracked/u/{name}"))).unwrap();
+    }
+    check("untracked");
+    fx.git("untracked", &["config", "status.showUntrackedFiles", "all"]);
+    check("untracked");
+}
+
 #[test]
 fn typechanges() {
     require_oracle!();
