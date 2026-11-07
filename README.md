@@ -87,6 +87,12 @@ Besides main-branch detection, these differences are intended:
 
 ## Limitations
 
+* **Stale file timestamps cost a rehash on every prompt.** After `touch`, or a tool that
+  rewrites files without changing them, radar rehashes those files to see that they're
+  unchanged (about 0.8 s per GiB). `git status` does the same once and records the result in
+  the index; radar never writes the index, so it pays again on every prompt until some git
+  command refreshes it. Past ~6 GiB of such files that exceeds the 5 s limit and the prompt is
+  empty. Run `git status` once to fix it.
 * **No fsmonitor or untracked cache.** gitoxide doesn't use `core.fsmonitor` or `core.untrackedCache`.
   In very large repos where those are enabled, `git status` can be much faster than radar, on every prompt.
   Without them, radar is close to `git status` (see the benchmarks).
