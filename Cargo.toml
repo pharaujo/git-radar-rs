@@ -1,0 +1,18 @@
+[package]
+name = "radar"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, git-radar compatible prompt segment for bash"
+license = "MIT"
+
+[dependencies]
+gix = { version = "=0.90.0", default-features = false, features = ["status", "revision", "sha1", "max-performance"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"
