@@ -1,0 +1,6 @@
+# Pinned so a new stable release can't fail CI with new clippy lints overnight.
+# Bump deliberately: change the version, then run fmt, clippy and the tests.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

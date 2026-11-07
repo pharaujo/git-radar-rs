@@ -30,10 +30,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust
+      - name: Install Rust (version from rust-toolchain.toml)
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup --version
+          rustup toolchain install
           rustc --version
 
       - name: Install git and the git-radar oracle
@@ -50,7 +50,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
 
       - run: cargo fmt --check
