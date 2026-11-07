@@ -341,23 +341,70 @@ impl gix::diff::rewrites::tracker::Change for Candidate {
     }
 }
 
+/// Files larger than this take part in intent-to-add pairing only as exact matches. They are
+/// hashed as a stream, while similarity needs both versions in memory, which for a big enough
+/// file would hit the guard's heap cap and blank the prompt. The value is git's default
+/// `core.bigFileThreshold`.
+const BIG_FILE_THRESHOLD: u64 = 512 << 20;
+
+fn big_file_threshold() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Some(n) = std::env::var("RADAR_TEST_BIG_FILE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return n;
+    }
+    BIG_FILE_THRESHOLD
+}
+
+/// A worktree file as a blob candidate. `data` is `None` for files over the big-file threshold,
+/// which are only hashed.
+struct WorktreeBlob {
+    id: gix::ObjectId,
+    kind: gix::object::tree::EntryKind,
+    data: Option<Vec<u8>>,
+}
+
 /// The blob git would store for the worktree file at `path`, without following symlinks.
 ///
 /// A symlink's blob is its target path, like `git add`, so a link to `/dev/zero` costs nothing.
 /// FIFOs, sockets, devices and directories are skipped: reading one could block forever or
-/// never reach EOF.
-fn worktree_blob(path: &std::path::Path) -> Option<(Vec<u8>, gix::object::tree::EntryKind)> {
+/// never reach EOF. Files over the big-file threshold are hashed as a stream and not kept.
+fn worktree_blob(path: &std::path::Path, hash: gix::hash::Kind) -> Option<WorktreeBlob> {
     use gix::object::tree::EntryKind;
     use std::os::unix::ffi::OsStringExt;
     let md = std::fs::symlink_metadata(path).ok()?;
-    if md.file_type().is_symlink() {
+    let (data, kind) = if md.file_type().is_symlink() {
         let target = std::fs::read_link(path).ok()?;
-        Some((target.into_os_string().into_vec(), EntryKind::Link))
+        (target.into_os_string().into_vec(), EntryKind::Link)
+    } else if md.file_type().is_file() && md.len() > big_file_threshold() {
+        let mut file = std::fs::File::open(path).ok()?;
+        let id = gix::objs::compute_stream_hash(
+            hash,
+            gix::object::Kind::Blob,
+            &mut file,
+            md.len(),
+            &mut gix::progress::Discard,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .ok()?;
+        return Some(WorktreeBlob {
+            id,
+            kind: EntryKind::Blob,
+            data: None,
+        });
     } else if md.file_type().is_file() {
-        Some((std::fs::read(path).ok()?, EntryKind::Blob))
+        (std::fs::read(path).ok()?, EntryKind::Blob)
     } else {
-        None
-    }
+        return None;
+    };
+    let id = gix::objs::compute_hash(hash, gix::object::Kind::Blob, &data).ok()?;
+    Some(WorktreeBlob {
+        id,
+        kind,
+        data: Some(data),
+    })
 }
 
 /// git pairs an intent-to-add entry (` A`) with a file deleted from the worktree (` D`) and
@@ -386,10 +433,18 @@ fn pair_intent_to_add_with_deleted(
         copies: None,
         ..rewrites
     });
+    let threshold = big_file_threshold();
+    // Big deleted files, matched only against big intent-to-add files with the same id.
+    let mut big_deleted: Vec<(gix::ObjectId, &BString)> = Vec::new();
+    let mut pairs = Vec::new();
     for (path, id, mode) in &deleted {
         let Some(mode) = mode.to_tree_entry_mode() else {
             continue;
         };
+        if repo.find_header(*id).is_ok_and(|h| h.size() > threshold) {
+            big_deleted.push((*id, path));
+            continue;
+        }
         tracker.try_push_change(
             Candidate {
                 id: *id,
@@ -403,22 +458,31 @@ fn pair_intent_to_add_with_deleted(
         let Ok(rel) = gix::path::from_byte_slice(path) else {
             continue;
         };
-        let Some((data, kind)) = worktree_blob(&workdir.join(rel)) else {
+        let Some(blob) = worktree_blob(&workdir.join(rel), repo.object_hash()) else {
             continue;
         };
-        let Ok(id) = gix::objs::compute_hash(repo.object_hash(), gix::object::Kind::Blob, &data)
-        else {
+        if blob.data.is_none() {
+            if let Some(i) = big_deleted.iter().position(|(id, _)| *id == blob.id) {
+                let (_, src) = big_deleted.swap_remove(i);
+                pairs.push((src.clone(), path.clone()));
+            }
             continue;
-        };
+        }
         tracker.try_push_change(
             Candidate {
-                id,
+                id: blob.id,
                 kind: ChangeKind::Addition,
-                mode: kind.into(),
+                mode: blob.kind.into(),
             },
             path.as_ref(),
         );
     }
+    let apply = |entries: &mut Entries, pairs: Vec<(BString, BString)>| {
+        for (src, dst) in pairs {
+            entries.xy.remove(&src);
+            entries.set_both(dst, b' ', b'R');
+        }
+    };
     let Ok(mut cache) = repo.diff_resource_cache(
         gix::diff::blob::pipeline::Mode::ToGit,
         gix::diff::blob::pipeline::WorktreeRoots {
@@ -426,9 +490,9 @@ fn pair_intent_to_add_with_deleted(
             new_root: Some(workdir),
         },
     ) else {
-        return;
+        return apply(entries, pairs);
     };
-    let mut pairs = Vec::new();
+    let big_pairs = pairs.len();
     let res = tracker.emit(
         |dest, src| {
             if let Some(src) = src {
@@ -441,12 +505,9 @@ fn pair_intent_to_add_with_deleted(
         |_| Ok::<_, std::convert::Infallible>(()),
     );
     if res.is_err() {
-        return;
+        pairs.truncate(big_pairs);
     }
-    for (src, dst) in pairs {
-        entries.xy.remove(&src);
-        entries.set_both(dst, b' ', b'R');
-    }
+    apply(entries, pairs);
 }
 
 /// Compute the porcelain `XY` pairs for `repo`. `open` opens submodules the same way the

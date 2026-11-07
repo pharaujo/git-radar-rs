@@ -80,6 +80,10 @@ Besides main-branch detection, these differences are intended:
   bytes with the stored blob and may report ` M` where git reports nothing. radar never writes
   the index, so this shows **on every prompt** until some git command, like `git status`,
   refreshes the index.
+* **Huge intent-to-add files pair with deleted files only when identical.** git pairs an
+  intent-to-add file with a similar deleted file and shows neither. Over 512 MiB (git's default
+  `core.bigFileThreshold`), comparing contents would need both versions in memory, so radar only
+  pairs exact copies and otherwise counts the deletion.
 
 ## Limitations
 
@@ -112,7 +116,7 @@ hooks, textconv) aren't used by anything radar does, but no test asserts that.
 
 ```bash
 cargo test                       # unit + golden tests (golden needs git-radar installed)
-cargo test -- --ignored          # also the >40k-object abbreviation and 1 GiB memory-cap tests
+cargo test -- --ignored          # also the >40k-object, 1 GiB memory-cap and huge-file tests
 GIT_RADAR_BIN=/path/to/git-radar cargo test
 scripts/bench.sh <repo-dir>      # hyperfine: git-radar vs radar vs `git status`
 ```

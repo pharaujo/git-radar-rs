@@ -702,6 +702,67 @@ fn intent_to_add_plus_deleted_similar_content() {
     fx.same("w");
 }
 
+/// Over the big-file threshold an intent-to-add file pairs only with identical content. git
+/// also pairs similar content, but that needs both versions in memory.
+#[cfg(debug_assertions)]
+#[test]
+fn intent_to_add_big_files_pair_only_when_identical() {
+    require_oracle!();
+    let fx = Fx::new();
+    fx.with_remote("master");
+    let big = fx.env.clone().set("RADAR_TEST_BIG_FILE_THRESHOLD", "64");
+    fx.commit("w", "gone.txt", &lines(20, "ita"), "gone");
+    std::fs::remove_file(fx.p("w/gone.txt")).unwrap();
+    // identical: paired, like git
+    fx.write("w/here.txt", &lines(20, "ita"));
+    fx.git("w", &["add", "-N", "here.txt"]);
+    let paired = fx.same("w");
+    assert_eq!(show(&fx.radar_with(&big, "w")), show(&paired));
+    // similar: git pairs them, radar shows the addition and the deletion
+    let mut similar = lines(14, "ita");
+    similar.push_str(&lines(6, "different"));
+    fx.write("w/here.txt", &similar);
+    let git = fx.same("w");
+    let no_renames = global_config(&fx, "[status]\n\trenames = false\n");
+    let unpaired = fx.oracle_with(&no_renames, "w");
+    assert_ne!(show(&unpaired), show(&git));
+    assert_eq!(show(&fx.radar_with(&big, "w")), show(&unpaired));
+}
+
+/// Intent-to-add files bigger than the heap cap must not blank the prompt.
+#[test]
+#[ignore = "writes 2.2 GiB of (sparse) files"]
+fn intent_to_add_bigger_than_memory_cap() {
+    require_oracle!();
+    let fx = Fx::new();
+    fx.with_remote("master");
+    let size = (1 << 30) + (64 << 20);
+    let sparse = |rel: &str, tail: &[u8]| {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::File::create(fx.p(rel)).unwrap();
+        f.set_len(size).unwrap();
+        f.seek(SeekFrom::End(-(tail.len() as i64))).unwrap();
+        f.write_all(tail).unwrap();
+    };
+    sparse("w/gone.bin", b"end\n");
+    fx.git("w", &["add", "gone.bin"]);
+    fx.git("w", &["commit", "-q", "-m", "big"]);
+    std::fs::remove_file(fx.p("w/gone.bin")).unwrap();
+    // identical: paired
+    sparse("w/here.bin", b"end\n");
+    fx.git("w", &["add", "-N", "here.bin"]);
+    let g = radar_guarded(&fx, &fx.env, "w", HANG_LIMIT, 1024);
+    assert!(g.out.status.success() && g.out.stderr.is_empty());
+    assert_eq!(show(&g.out.stdout), show(&fx.oracle("w")));
+    // similar: not paired, so the deletion shows (git-radar doesn't count ` A`), but still a
+    // prompt
+    sparse("w/here.bin", b"END\n");
+    let g = radar_guarded(&fx, &fx.env, "w", HANG_LIMIT, 1024);
+    assert!(g.out.status.success() && g.out.stderr.is_empty());
+    let out = show(&g.out.stdout);
+    assert!(out.contains("git:(") && out.contains("1{1;31mD"), "{out}");
+}
+
 /// Mark `w/<name>` intent-to-add, then replace the worktree file with whatever `make` creates.
 fn intent_to_add_then_replace(fx: &Fx, name: &str, make: impl FnOnce(&Path)) {
     fx.write(&format!("w/{name}"), "placeholder\n");
