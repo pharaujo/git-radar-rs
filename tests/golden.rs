@@ -1287,6 +1287,77 @@ fn head_on_main_skips_master_segment() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// ownership: repositories owned by another user are refused
+
+/// `sudo chown -R` of a fixture path, undone on drop so the temp dir can be removed even when
+/// an assertion fails.
+struct Chowned(PathBuf, u32);
+
+impl Chowned {
+    fn to_root(path: PathBuf) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let me = std::fs::metadata(&path).unwrap().uid();
+        sudo_chown("0:0", &path);
+        Chowned(path, me)
+    }
+}
+
+impl Drop for Chowned {
+    fn drop(&mut self) {
+        sudo_chown(&self.1.to_string(), &self.0);
+    }
+}
+
+fn sudo_chown(owner: &str, path: &Path) {
+    // `-n`: fail instead of prompting for a password.
+    let status = Command::new("/usr/bin/sudo")
+        .args(["-n", "/usr/sbin/chown", "-R", owner])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "sudo -n chown {owner} failed");
+}
+
+/// Needs passwordless sudo, so it only runs with `RADAR_SUDO_TESTS=1` (set in CI). A repository
+/// owned by root must print nothing, as git refuses it as "dubious ownership"; the repository's
+/// own config can't allow itself, but a global `safe.directory` can.
+#[test]
+fn repository_owned_by_another_user_is_refused() {
+    if std::env::var_os("RADAR_SUDO_TESTS").is_none() {
+        eprintln!("skipping: set RADAR_SUDO_TESTS=1 (needs passwordless sudo)");
+        return;
+    }
+    require_oracle!();
+    let fx = Fx::new();
+    fx.with_remote("master");
+    fx.write("w/README", "dirty\n");
+    let trusted = fx.radar("w");
+    assert!(!trusted.is_empty());
+    // A repository trying to trust itself.
+    fx.git("w", &["config", "safe.directory", "*"]);
+    let _root = Chowned::to_root(fx.p("w"));
+
+    let git_status = fx.run_in(&fx.env, &fx.p("w"), "git", &["status", "--porcelain"]);
+    assert!(
+        String::from_utf8_lossy(&git_status.stderr).contains("dubious ownership"),
+        "fixture must be refused by git: {}",
+        String::from_utf8_lossy(&git_status.stderr)
+    );
+    assert_eq!(
+        show(&fx.radar("w")),
+        "",
+        "radar read a root-owned repository"
+    );
+
+    let allowed = global_config(
+        &fx,
+        &format!("[safe]\n\tdirectory = {}\n", fx.p("w").display()),
+    );
+    let out = fx.same_with(&allowed, "w");
+    assert_eq!(show(&out), show(&trusted));
+}
+
+// ---------------------------------------------------------------------------------------------
 // filter drivers are never executed
 
 fn logger_script(fx: &Fx, transform: bool) -> (PathBuf, PathBuf) {

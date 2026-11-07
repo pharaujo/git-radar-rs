@@ -144,8 +144,11 @@ cargo deny --locked check advisories   # RustSec advisories for Cargo.lock (need
 ```
 
 Without git-radar the golden tests skip themselves. Set `RADAR_REQUIRE_ORACLE=1` to make them
-fail instead. CI (`.github/workflows/ci.yml`, macOS) sets it and runs fmt, clippy, and the debug,
-release and ignored tests. A separate job checks `Cargo.lock` against the RustSec advisory
+fail instead. `RADAR_SUDO_TESTS=1` enables a test that needs passwordless `sudo`: it `chown`s a
+fixture to root and checks that radar refuses it like git does, that the repository's own
+`safe.directory` can't override that, and that a global one can. CI
+(`.github/workflows/ci.yml`, macOS) sets both and runs fmt, clippy, and the debug, release and
+ignored tests. A separate job checks `Cargo.lock` against the RustSec advisory
 database on every push and weekly, so a new advisory fails CI without a code change.
 
 The golden tests build each fixture repo with the `git` CLI in a temp dir with a fully cleared
