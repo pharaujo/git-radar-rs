@@ -343,6 +343,82 @@ fn submodule_ignore_config() {
     fx.same("w");
 }
 
+/// `w` with submodule `mid`, which has its own submodule `inner`, both checked out.
+fn nested_submodule_fixture(fx: &Fx) {
+    let file = ["-c", "protocol.file.allow=always"];
+    fx.with_remote("master");
+    for repo in ["inner", "mid"] {
+        fx.git(".", &["init", "-q", "-b", "master", repo]);
+        fx.commit(repo, "f", &format!("{repo}1\n"), repo);
+    }
+    fx.git(
+        "mid",
+        &[&file[..], &["submodule", "add", "-q", "../inner", "inner"]].concat(),
+    );
+    fx.git("mid", &["commit", "-q", "-m", "add inner"]);
+    fx.git(
+        "w",
+        &[&file[..], &["submodule", "add", "-q", "../mid", "mid"]].concat(),
+    );
+    fx.git("w", &["commit", "-q", "-m", "add mid"]);
+    fx.git(
+        "w",
+        &[
+            &file[..],
+            &["submodule", "update", "-q", "--init", "--recursive"],
+        ]
+        .concat(),
+    );
+    assert!(fx.p("w/mid/inner/f").is_file());
+}
+
+#[test]
+fn nested_submodules() {
+    require_oracle!();
+    let fx = Fx::new();
+    nested_submodule_fixture(&fx);
+    let clean = fx.same("w");
+    // modified content two levels down
+    fx.write("w/mid/inner/f", "modified\n");
+    assert_ne!(fx.same("w"), clean);
+    // untracked content two levels down
+    fx.git("w/mid/inner", &["checkout", "-q", "--", "f"]);
+    fx.write("w/mid/inner/untracked", "u\n");
+    fx.same("w");
+    // new commits two levels down
+    std::fs::remove_file(fx.p("w/mid/inner/untracked")).unwrap();
+    fx.commit("w/mid/inner", "f", "inner2\n", "inner2");
+    fx.same("w");
+}
+
+/// Past the depth limit a submodule's contents aren't scanned, but its HEAD is still compared.
+#[cfg(debug_assertions)]
+#[test]
+fn submodule_depth_limit() {
+    require_oracle!();
+    let fx = Fx::new();
+    nested_submodule_fixture(&fx);
+    let depth = |n: usize| {
+        fx.env
+            .clone()
+            .set("RADAR_TEST_SUBMODULE_DEPTH", n.to_string())
+    };
+    let clean = fx.same("w");
+    fx.write("w/mid/inner/f", "modified\n");
+    let dirty = fx.same("w");
+    assert_ne!(dirty, clean);
+    assert_eq!(show(&fx.radar_with(&depth(2), "w")), show(&dirty));
+    // `inner` is at depth 2: not scanned, so `mid` looks clean.
+    assert_eq!(show(&fx.radar_with(&depth(1), "w")), show(&clean));
+    assert_eq!(show(&fx.radar_with(&depth(0), "w")), show(&clean));
+    // `mid`'s HEAD moving is still seen without scanning it.
+    fx.git("w/mid/inner", &["checkout", "-q", "--", "f"]);
+    fx.commit("w/mid", "g", "g\n", "mid2");
+    let moved = fx.same("w");
+    assert_ne!(moved, clean);
+    assert_eq!(show(&fx.radar_with(&depth(0), "w")), show(&moved));
+}
+
 // ---------------------------------------------------------------------------------------------
 // rename configuration (status.* falls back to diff.*)
 

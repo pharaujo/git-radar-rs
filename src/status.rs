@@ -224,12 +224,31 @@ fn submodule_ignore(repo: &gix::Repository, rela_path: &[u8]) -> SubmoduleIgnore
         .map_or(SubmoduleIgnore::None, map)
 }
 
+/// How many levels of nested submodules have their contents scanned. Each level is a full
+/// status run, and git has no limit, so a repository nested hundreds of levels deep (bounded
+/// only by `PATH_MAX`) would cost hundreds of status runs. Past this depth a submodule is
+/// still reported when its HEAD moved, but uncommitted changes inside it are not seen.
+const MAX_SUBMODULE_DEPTH: usize = 16;
+
+fn max_submodule_depth() -> usize {
+    #[cfg(debug_assertions)]
+    if let Some(n) = std::env::var("RADAR_TEST_SUBMODULE_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return n;
+    }
+    MAX_SUBMODULE_DEPTH
+}
+
 /// Whether the checked-out submodule at `rela_path` (gitlink `expected`) shows up as ` M`.
+/// `depth` is the submodule's nesting level: 1 for a submodule of the superproject.
 fn submodule_is_modified(
     repo: &gix::Repository,
     rela_path: &[u8],
     expected: gix::ObjectId,
     open: &dyn Fn(&std::path::Path) -> Option<gix::Repository>,
+    depth: usize,
 ) -> bool {
     let ignore = submodule_ignore(repo, rela_path);
     if ignore == SubmoduleIgnore::All {
@@ -252,10 +271,10 @@ fn submodule_is_modified(
         .head_id()
         .map(|id| id.detach() != expected)
         .unwrap_or(false);
-    if new_commits || ignore == SubmoduleIgnore::Dirty {
+    if new_commits || ignore == SubmoduleIgnore::Dirty || depth > max_submodule_depth() {
         return new_commits;
     }
-    let Some(entries) = collect(sub, open) else {
+    let Some(entries) = collect_at(sub, open, depth) else {
         return false;
     };
     entries.has_tracked_changes() || (ignore == SubmoduleIgnore::None && entries.has_untracked())
@@ -433,8 +452,17 @@ fn pair_intent_to_add_with_deleted(
 /// Compute the porcelain `XY` pairs for `repo`. `open` opens submodules the same way the
 /// superproject was opened. Returns `None` if status could not be computed.
 pub fn collect(
+    repo: gix::Repository,
+    open: &dyn Fn(&std::path::Path) -> Option<gix::Repository>,
+) -> Option<Entries> {
+    collect_at(repo, open, 0)
+}
+
+/// [`collect`] for a repository at submodule nesting level `depth` (0: the superproject).
+fn collect_at(
     mut repo: gix::Repository,
     open: &dyn Fn(&std::path::Path) -> Option<gix::Repository>,
+    depth: usize,
 ) -> Option<Entries> {
     repo.workdir()?;
     strip_filter_drivers(&mut repo);
@@ -538,7 +566,7 @@ pub fn collect(
                 continue;
             }
             let path = entry.path(&index);
-            if submodule_is_modified(&repo, path, entry.id, open) {
+            if submodule_is_modified(&repo, path, entry.id, open, depth + 1) {
                 entries.set_y(path.to_owned(), b'M');
             }
         }

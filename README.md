@@ -94,6 +94,9 @@ Besides main-branch detection, these differences are intended:
   A git in an unrecognized location has its installation config ignored. Apple git's
   installation-level `safe.directory` is also ignored, because gitoxide reads `safe.directory`
   only from system and global config.
+* **Nested submodules are scanned 16 levels deep.** Each level is a full status run. Below
+  that, a submodule still shows ` M` when its HEAD moved, but changes inside it aren't seen.
+  git has no such limit.
 * **Untrusted repositories print nothing**, like git's "dubious ownership" refusal. That covers
   repos owned by another user and not allowed by `safe.directory`.
 * **bash only.** There's no `--zsh`/`--fish`, no `--fetch`, and no `GIT_RADAR_*` or `.gitradarrc` customization.
