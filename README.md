@@ -106,3 +106,7 @@ Measured on an Apple Silicon Mac with `scripts/bench.sh` (hyperfine `-N --warmup
 |--------------------------------|-----------|---------|--------------------------|
 | 2 files, upstream, stash       | 524 ms    | 13.8 ms | 28.3 ms                  |
 | 60 000 files (synthetic)       | 833 ms    | 265 ms  | 281 ms                   |
+
+## License
+
+[MIT](LICENSE)
