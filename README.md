@@ -20,17 +20,33 @@ $ radar --bash
 cargo install --path . --locked     # installs ~/.cargo/bin/radar
 ```
 
-In `~/.bashrc`, or in a function used by `PS1`:
+In `~/.bashrc`:
 
 ```bash
-if command -v radar >/dev/null; then
-  r=$(radar --bash 2>/dev/null); [ -n "$r" ] && printf '%s' "$r"
+# Look radar up once, when this file is sourced, not on every prompt.
+if [[ -x $HOME/.cargo/bin/radar ]]; then
+    _radar_bin=$HOME/.cargo/bin/radar
+else
+    _radar_bin=$(command -v radar 2> /dev/null)
 fi
+
+radar_prompt() {
+    [[ -n $_radar_bin ]] || return 0
+    local out
+    out=$("$_radar_bin" --bash 2> /dev/null)
+    [[ -n $out ]] && printf '%s' "$out"
+}
+
+PS1='\w$(radar_prompt) \$ '
 ```
 
 The output is raw bytes. Escape sequences are already wrapped in readline's `\001`/`\002`
 markers, so no `echo -e` is needed. It starts with a space, like git-radar's. Outside a
 repository radar prints nothing. It always exits 0 and never writes to stderr.
+
+**Coming from git-radar?** The usual `echo -e $(git-radar --bash)` is unquoted, so it drops
+the leading space. If your `PS1` already has a space before the segment, print
+`"${out# }"` instead of `"$out"` to keep the prompt looking the same.
 
 radar also prints nothing if it runs longer than **5 seconds** or allocates more than **1 GiB** of
 heap. radar runs in every directory you `cd` into, and some files in `.git` are read to the end.
