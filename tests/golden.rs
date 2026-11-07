@@ -1443,6 +1443,140 @@ fn no_git_subprocess() {
     assert_eq!(show(&shimmed), show(&normal));
 }
 
+/// Every helper git can be configured to run, pointed at a logging script, across the states
+/// that make radar read file contents: radar must run none of them, and print exactly what it
+/// prints without them. The binary links gix's process-spawning code (filter drivers, textconv),
+/// so this is what keeps a gix upgrade from starting to run any.
+#[test]
+fn no_configured_helper_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    let log = fx.p("helper.log");
+    let marker = fx.p("helper.sh");
+    std::fs::write(
+        &marker,
+        format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\nexit 1\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let hooks = fx.p("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    for hook in [
+        "pre-commit",
+        "post-checkout",
+        "post-index-change",
+        "fsmonitor-watchman",
+        "reference-transaction",
+    ] {
+        std::fs::copy(&marker, hooks.join(hook)).unwrap();
+    }
+
+    let base = |repo: &str| {
+        fx.git(".", &["init", "-q", "-b", "master", repo]);
+        for name in ["a", "b", "c"] {
+            fx.write(&format!("{repo}/{name}.txt"), &lines(40, name));
+        }
+        fx.write(&format!("{repo}/small"), "s\n");
+        fx.git(repo, &["add", "."]);
+        fx.git(repo, &["commit", "-q", "-m", "init"]);
+    };
+    let states = [
+        "clean",
+        "stale",
+        "modified",
+        "rename",
+        "ita",
+        "untracked",
+        "super",
+    ];
+    for repo in states {
+        base(repo);
+    }
+    touch(&fx.p("stale/a.txt"), "202001010000");
+    touch(&fx.p("stale/small"), "202001010000");
+    fx.write("modified/a.txt", "changed\n");
+    fx.write("modified/small", "changed\n");
+    fx.git("rename", &["mv", "b.txt", "b2.txt"]);
+    fx.write("rename/b2.txt", &(lines(40, "b") + "tweak\n"));
+    fx.git("rename", &["add", "b2.txt"]);
+    std::fs::remove_file(fx.p("ita/c.txt")).unwrap();
+    fx.write("ita/c2.txt", &(lines(40, "c") + "extra\n"));
+    fx.git("ita", &["add", "-N", "c2.txt"]);
+    fx.write("untracked/new.txt", "u\n");
+    fx.git(".", &["init", "-q", "-b", "master", "subsrc"]);
+    fx.commit("subsrc", "s.txt", &lines(40, "s"), "s");
+    fx.git(
+        "super",
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../subsrc",
+            "sm",
+        ],
+    );
+    fx.git("super", &["commit", "-q", "-m", "sm"]);
+    fx.write("super/sm/s.txt", "dirty\n");
+    let before: Vec<_> = states.iter().map(|r| fx.radar(r)).collect();
+
+    // Mixed-case section names are deliberate: git matches them case-insensitively.
+    let m = marker.display();
+    let hostile = format!(
+        "[FILTER \"x\"]\n\tclean = {m} clean\n\tsmudge = {m} smudge\n\
+         [Filter \"y\"]\n\tprocess = {m} process\n\
+         [filter \"z\"]\n\tclean = {m} clean-required\n\trequired = true\n\
+         [diff \"x\"]\n\ttextconv = {m} textconv\n\tcommand = {m} diff-command\n\
+         [diff]\n\texternal = {m} diff-external\n\
+         [merge \"x\"]\n\tdriver = {m} merge\n\
+         [core]\n\tfsmonitor = {m}\n\thooksPath = {hooks}\n\tsshCommand = {m} ssh\n\
+         \tpager = {m} pager\n\taskPass = {m} askpass\n\teditor = {m} editor\n\
+         [credential]\n\thelper = {m} credential\n\
+         [gpg]\n\tprogram = {m} gpg\n",
+        hooks = hooks.display()
+    );
+    let attributes = "* filter=x diff=x merge=x\n*.txt filter=y\nsmall filter=z\n";
+    let git_dirs = states
+        .iter()
+        .map(|r| format!("{r}/.git"))
+        .chain(["super/.git/modules/sm".to_owned()]);
+    for dir in git_dirs {
+        let mut config = std::fs::read_to_string(fx.p(&format!("{dir}/config"))).unwrap();
+        config.push_str(&hostile);
+        std::fs::write(fx.p(&format!("{dir}/config")), config).unwrap();
+        std::fs::create_dir_all(fx.p(&format!("{dir}/info"))).unwrap();
+        fx.write(&format!("{dir}/info/attributes"), attributes);
+    }
+    // Sanity: git sees every helper. `git config` runs none of them.
+    for key in [
+        "filter.x.clean",
+        "filter.y.process",
+        "filter.z.clean",
+        "diff.x.textconv",
+        "diff.external",
+        "core.fsmonitor",
+        "credential.helper",
+    ] {
+        assert!(
+            fx.git("clean", &["config", "--get", key])
+                .contains("helper.sh"),
+            "{key} not configured"
+        );
+    }
+
+    for (repo, before) in states.iter().zip(&before) {
+        let after = fx.radar(repo);
+        assert_eq!(show(&after), show(before), "{repo}: output changed");
+    }
+    assert_eq!(
+        log_len(&log),
+        0,
+        "radar ran a helper: {:?}",
+        std::fs::read_to_string(&log)
+    );
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn panic_prints_nothing_and_exits_zero() {

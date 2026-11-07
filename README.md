@@ -114,9 +114,16 @@ Besides main-branch detection, these differences are intended:
 ### Scope of "no subprocesses"
 
 What's tested: radar never spawns `git`. A test replaces `git` on `PATH` with a logging shim.
-Filter drivers are not run in the tested configurations: a `clean` filter, a `process` filter,
-and a `clean` filter inside a submodule. Other helpers git might run (hooks, `core.fsmonitor`
-hooks, textconv) aren't used by anything radar does, but no test asserts that.
+Another test points every helper git can run at a logging script: filter drivers (also with
+mixed-case section names and `required = true`), `diff.*.textconv`, `diff.*.command`,
+`diff.external`, merge drivers, `core.fsmonitor`, hooks, `core.sshCommand`, the pager, askpass,
+the editor, credential helpers and `gpg.program`. It runs radar on a clean tree, stale
+timestamps, modified files, a staged rename, intent-to-add plus deletion, untracked files and a
+dirty submodule, and asserts that no helper ran and the output is the same as without them.
+
+This is a test, not a sandbox. The binary contains gitoxide's code for running filter drivers
+and textconv; radar keeps it from running by removing `filter.*` config and by never asking
+gitoxide for text conversion.
 
 ## Development
 
